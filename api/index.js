@@ -135,18 +135,18 @@ app.get('/post/:id', async (req, res) => {
 })
 
 app.get('/search', async (req, res) => {
-  const query = req.query.query;
   try {
-    const posts = await Post.find({
+    const query = req.query.q;
+    const regex = new RegExp(query, 'i');
+    const results = await Post.find({
       $or: [
-        { title: new RegExp(query, 'i') },
-        { author: new RegExp(query, 'i') },
-        { description: new RegExp(query, 'i') }
+        { title: { $regex: query, $options: 'i' } },
+        { summary: { $regex: query, $options: 'i' } }
       ]
     });
-    res.json(posts);
+    res.json(results);
   } catch (error) {
-    res.status(500).send('Server error');
+    res.status(500).send(error);
   }
 });
 
