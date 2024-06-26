@@ -1,0 +1,276 @@
+const express = require('express');
+const cors = require('cors');
+const mongoose = require("mongoose");
+const User = require('./models/User');
+const Post = require('./models/Post');
+const Summary = require('./models/Summary')
+const bcrypt = require('bcryptjs');
+const app = express();
+const jwt = require('jsonwebtoken');
+const axios = require('axios')
+const cookieParser = require('cookie-parser');
+const multer = require('multer');
+//const fetch = require('node-fetch');
+const uploadMiddleware = multer({ dest: 'uploads/' });
+const fs = require('fs');
+
+const salt = bcrypt.genSaltSync(10);
+const secret = 'asdfe45we45w345wegw345werjktjwertkj';
+const HUGGINGFACE_API_URL = 'https://api-inference.huggingface.co/models/callmequan137/T5_text_summarization';
+const HUGGINGFACE_API_KEY = 'Bearer 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';
+
+app.use(cors({credentials:true,origin:'http://localhost:3000'}));
+app.use(express.json());
+app.use(cookieParser());
+app.use('/uploads', express.static(__dirname + '/uploads'));
+
+mongoose.connect('mongodb://localhost:27017/test1', { useNewUrlParser: true, useUnifiedTopology: true });
+
+app.post('/register', async (req,res) => {
+  const {username,password} = req.body;
+  try{
+    const userDoc = await User.create({
+      username,
+      password:bcrypt.hashSync(password,salt),
+    });
+    res.json(userDoc);
+  } catch(e) {
+    console.log(e);
+    res.status(400).json(e);
+  }
+});
+
+app.post('/login', async (req,res) => {
+  const {username,password} = req.body;
+  const userDoc = await User.findOne({username});
+  const passOk = bcrypt.compareSync(password, userDoc.password);
+  if (passOk) {
+    // logged in
+    jwt.sign({username,id:userDoc._id}, secret, {}, (err,token) => {
+      if (err) throw err;
+      res.cookie('token', token).json({
+        id:userDoc._id,
+        username,
+      });
+    });
+  } else {
+    res.status(400).json('wrong credentials');
+  }
+});
+
+app.get('/profile', (req,res) => {
+  const {token} = req.cookies;
+  jwt.verify(token, secret, {}, (err,info) => {
+    if (err) throw err;
+    res.json(info);
+  });
+});
+
+app.post('/logout', (req,res) => {
+  res.cookie('token', '').json('ok');
+});
+
+app.post('/post', uploadMiddleware.single('file'), async (req,res) => {
+  const {originalname,path} = req.file;
+  const parts = originalname.split('.');
+  const ext = parts[parts.length - 1];
+  const newPath = path+'.'+ext;
+  fs.renameSync(path, newPath);
+
+  const {token} = req.cookies;
+  jwt.verify(token, secret, {}, async (err,info) => {
+    if (err) throw err;
+    const {title,summary,content} = req.body;
+    const postDoc = await Post.create({
+      title,
+      summary,
+      content,
+      cover:newPath,
+      author:info.id,
+    });
+    res.json(postDoc);
+  });
+
+});
+
+app.put('/post',uploadMiddleware.single('file'), async (req,res) => {
+  let newPath = null;
+  if (req.file) {
+    const {originalname,path} = req.file;
+    const parts = originalname.split('.');
+    const ext = parts[parts.length - 1];
+    newPath = path+'.'+ext;
+    fs.renameSync(path, newPath);
+  }
+
+  const {token} = req.cookies;
+  jwt.verify(token, secret, {}, async (err,info) => {
+    if (err) throw err;
+    const {id,title,summary,content} = req.body;
+    const postDoc = await Post.findById(id);
+    const isAuthor = JSON.stringify(postDoc.author) === JSON.stringify(info.id);
+    if (!isAuthor) {
+      return res.status(400).json('you are not the author');
+    }
+    await postDoc.update({
+      title,
+      summary,
+      content,
+      cover: newPath ? newPath : postDoc.cover,
+    });
+
+    res.json(postDoc);
+  });
+
+});
+
+app.get('/post', async (req,res) => {
+  res.json(
+    await Post.find()
+      .populate('author', ['username'])
+      .sort({createdAt: -1})
+      .limit(20)
+  );
+});
+
+app.get('/post/:id', async (req, res) => {
+  const {id} = req.params;
+  const postDoc = await Post.findById(id).populate('author', ['username']);
+  res.json(postDoc);
+})
+
+app.get('/search', async (req, res) => {
+  try {
+    const query = req.query.q;
+    const regex = new RegExp(query, 'i');
+    const results = await Post.find({
+      $or: [
+        { title: { $regex: query, $options: 'i' } },
+        { summary: { $regex: query, $options: 'i' } }
+      ]
+    });
+    res.json(results);
+  } catch (error) {
+    res.status(500).send(error);
+  }
+});
+
+// app.post('/summarize', async (req, res) => {
+//   const { paragraph } = req.body;
+//   console.log('Received request to summarize:', paragraph);
+
+//   try {
+//     const response = await fetch(
+//       'https://api-inference.huggingface.co/models/callmequan137/T5_text_summarization',
+//       {
+//         headers: { Authorization: 'Bearer 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' },
+//         method: 'POST',
+//         body: JSON.stringify({ inputs: paragraph }),
+//       }
+//     );
+//     const result = await response.json();
+//     res.json({ summary: result[0].summary_text });
+//   } catch (error) {
+//     console.error('Error summarizing paragraph:', error);
+//     res.status(500).json({ error: 'An error occurred while summarizing the paragraph.' });
+//   }
+// });
+
+const summarizeParagraph = async (paragraph) => {
+  try {
+    const response = await axios.post(
+      'https://api-inference.huggingface.co/models/callmequan137/T5_text_summarization',
+      { inputs: paragraph },
+      {
+        headers: {
+          Authorization: 'Bearer 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', 
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+    return response.data;
+  } catch (error) {
+    if (error.response && error.response.data.error.includes('currently loading')) {
+      const estimatedTime = error.response.data.estimated_time || 10;
+      await new Promise(resolve => setTimeout(resolve, estimatedTime * 1000));
+      return summarizeParagraph(paragraph); 
+    }
+    throw error;
+  }
+};
+
+app.post('/summarize', async (req, res) => {
+  const { paragraph } = req.body;
+  if (!paragraph) {
+    return res.status(400).json({ error: 'Paragraph is required' });
+  }
+
+  try {
+    const summary = await summarizeParagraph(paragraph);
+    res.json(summary);
+  } catch (error) {
+    console.error('Error summarizing paragraph:', error);
+    res.status(500).json({ error: 'An error occurred while summarizing the paragraph.', details: error.response?.data });
+  }
+});
+
+// app.get('/summaries', async (req, res) => {
+//   try {
+//     const summaries = await Summary.find().sort({ date: -1 });
+//     res.json(summaries);
+//   } catch (error) {
+//     res.status(500).json({ error: 'An error occurred while retrieving summaries.' });
+//   }
+// });
+
+// app.post('/summary', async (req, res) => {
+//   const { paragraph, summary } = req.body;
+//   const summaryDoc = await Summary.create({
+//     paragraph,
+//     summary
+//   })
+//   res.json(summaryDoc);
+// });
+
+app.post('/summary', uploadMiddleware.single('file'), async (req,res) => {
+  // const {originalname,path} = req.file;
+  // const parts = originalname.split('.');
+  // const ext = parts[parts.length - 1];
+  // const newPath = path+'.'+ext;
+  // fs.renameSync(path, newPath);
+
+  const {token} = req.cookies;
+  jwt.verify(token, secret, {}, async (err,info) => {
+    if (err) throw err;
+    const { paragraph, summary } = req.body;
+    const summaryDoc = await Summary.create({
+      paragraph,
+      summary,
+      author:info.id,
+    })
+    res.json(summaryDoc);
+  });
+});
+
+// app.get('/summary', async (req, res) => {
+//   const summaryDoc = await Summary.find().populate('author', 'name'); // Populate author with their name if you have author info
+//   res.json(summaryDoc);
+// });
+
+app.get('/summary', async (req,res) => {
+  res.json(
+    await Summary.find()
+      .populate('author', ['username'])
+      .sort({createdAt: -1})
+      .limit(20)
+  );
+});
+
+app.get('/summary/:id', async (req, res) => {
+  const {id} = req.params;
+  const postDoc = await Summary.findById(id).populate('author', ['username']);
+  res.json(postDoc);
+})
+
+app.listen(4000);
+//
